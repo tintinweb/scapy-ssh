@@ -2,11 +2,31 @@
 # -*- coding: UTF-8 -*-
 # Author : tintinweb@oststrom.com <github.com/tintinweb>
 # http://www.secdev.org/projects/scapy/doc/build_dissect.html
+#https://tools.ietf.org/html/rfc4253
 from scapy.packet import Packet, bind_layers
 from scapy.fields import *
 from scapy.layers.inet import TCP, Raw
 import os, time, hashlib
 
+    
+class StrCustomTerminatorField(StrField):
+    def __init__(self, name, default, fmt="H", remain=0,terminator="\x00\x00", consume_terminator=True):
+        StrField.__init__(self,name,default,fmt,remain)
+        self.terminator=terminator
+        self.consume_terminator=consume_terminator
+    def addfield(self, pkt, s, val):
+        return s+self.i2m(pkt, val)+self.terminator
+    def getfield(self, pkt, s):
+        l = s.find(self.terminator)
+        if l < 0:
+            #XXX terminator not found
+            return "",s
+        if self.consume_terminator:
+            return s[l+len(self.terminator):],self.m2i(pkt, s[:l])
+        return s[l:],self.m2i(pkt, s[:l])
+    def randval(self):
+        return RandTermString(RandNum(0,1200),self.terminator)
+  
 class HintField(StrField):
     def __init__(self, name, default, fmt="H", remain=0):
         StrField.__init__(self,name,default,fmt,remain)
@@ -100,7 +120,8 @@ class XFieldLenField(FieldLenField):
 
 
 
-SSH_MESSAGE_TYPES = {   0x14:"kex_init",
+SSH_MESSAGE_TYPES = {   0x01:"disconnect",
+                        0x14:"kex_init",
                         0x15:"new_keys",
                         0xff:"unknown"}
 SSH_TYPE_BOOL = {0x00:True,
@@ -132,7 +153,7 @@ def ssh_calculate_mac(pkt, x):
     return getattr(hashlib,pkt.mac)(pkt.data).digest()
     
 class SSHEncryptedPacket(Packet):
-    name = "SSH Packet"
+    name = "SSH Encrypted Packet"
     fields_desc = [
                    StrField("data",None),
                    DynamicStrField("mac",None,adjust=ssh_calculate_mac),
@@ -168,7 +189,31 @@ class SSHKexInit(Packet):
                        ByteEnumField("kex_first_packet_follows", 0x00, SSH_TYPE_BOOL),
                        IntField("reserved", 0x00),
                     ]
-
+          
+SSH_DISCONNECT_REASONS={  1:'HOST_NOT_ALLOWED_TO_CONNECT',
+                          2:'PROTOCOL_ERROR',
+                          3:'KEY_EXCHANGE_FAILED',
+                          4:'RESERVED',
+                          5:'MAC_ERROR',
+                          6:'COMPRESSION_ERROR',
+                          7:'SERVICE_NOT_AVAILABLE',
+                          8:'PROTOCOL_VERSION_NOT_SUPPORTED',
+                          9:'HOST_KEY_NOT_VERIFIABLE',
+                          10:'CONNECTION_LOST',
+                          11:'BY_APPLICATION',             
+                          12:'TOO_MANY_CONNECTIONS',            
+                          13:'AUTH_CANCELLED_BY_USER',      
+                          14:'NO_MORE_AUTH_METHODS_AVAILABLE',  
+                          15:'ILLEGAL_USER_NAME',
+                        }
+                    
+class SSHDisconnect(Packet):
+    name = "SSH Disconnect"
+    fields_desc = [
+                   IntEnumField("reason", 0xff, SSH_DISCONNECT_REASONS),
+                   StrCustomTerminatorField("description","",terminator="\x00\x00\x00\x00"),
+                   StrCustomTerminatorField("language","",terminator="\x00",consume_terminator=False),
+                   ]
        
 class SSH(Packet): 
     name = "SSH"
@@ -184,7 +229,7 @@ class SSH(Packet):
                 return SSHIdent
             
             dummy = SSHMessage(payload,_internal=1)
-            if len(payload)==dummy.length+dummy.padding_length+8:
+            if len(payload)<=dummy.length+4:
                 return SSHMessage
             
         except:
@@ -200,4 +245,5 @@ bind_layers(TCP, SSH, sport=22)
 
 bind_layers(SSH, SSHMessage)
 bind_layers(SSHMessage, SSHKexInit, {'type':0x14})
+bind_layers(SSHMessage, SSHDisconnect, {'type':0x01})
 bind_layers(SSH, SSHEncryptedPacket)
